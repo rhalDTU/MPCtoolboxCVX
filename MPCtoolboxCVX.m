@@ -1,12 +1,81 @@
 % Linear MPC examples using CVX
 % 1) Download and install CVX
 %    cvxr.com/cvx and run 'cvx_setup' in Matlab
-% 2) Run examples by running 'MPCtoolboxCVX'
-%    Runs 'WindPowerStorageExample' by default
-% Rasmus Halvgaard, rhal@dtu.dk, 2016-02-24
+% 2) Run an example by running 'MPCtoolboxCVX'
+%    Runs 'FirstOrderExample' by default
+%
+% - Check 'cvx_status' for solver status
+% - For closed-loop feedback:
+%     Use only u(1) and re-solve optimization problem
+%     in next time step with updated information
+% Rasmus Halvgaard, rhal@DTU.dk, 2016-02-26
 
 function MPCtoolboxCVX
-  WindPowerStorageExample;
+  FirstOrderExample;
+  % WindPowerStorageExample;
+end
+
+function FirstOrderExample
+% Example of Economic MPC and a first order system
+Ts = 1; % sampling period
+Np = 50; % prediction horizon
+p = 0.9*ones(Np,1); % price
+p(30:35) = 0.2;
+r = 1e5*ones(Np,1); % output slack variable penalty
+
+% First order model and constraints
+umax = 1; umin = 0; % input constraints
+dumax = umax/2;  % input rate constraints
+dumin = -dumax;
+ymax = 4*ones(Np,1); % output constraints
+ymin = ones(Np,1); 
+ymin(15:20) = 2;
+x0 = -0.5;  % initial state
+tau = 10; % time constant
+K = 5; % gain
+A = -1/tau; B = K/tau; C = 1; % dx(t)/dt = A*x(t) + B*u(t), y=C*x(t)
+[Ad,Bd] = css2dss(Ts,A,B,[]); % x(k+1) = Ad*x(k) + Bd*u(k), y=C*x(k)
+[Hu,H0] = ImpulseResponse(Np,Ad,Bd,C,[]);
+dH = differenceMatrix(Np,1);
+
+% Solve MPC
+cvx_begin %quiet
+    variables y(Np) u(Np) s(Np)
+    minimize( p'*u  + r'*s)
+    subject to             
+        umin <= u <= umax; % input constraints
+        dumin <= dH*u <= dumax; % input rate constraints
+        y == Hu*u + H0*x0; % impulse response model  
+        ymin - s <= y <= ymax + s; % soft output constraints
+        s >= 0;
+cvx_end
+
+% Results
+% The Economic MPC minimizes costs and maintains operating constraints.
+% (Time)  
+% (0:5)   The initial condition is lower than the output constraint.
+%         So the controller brings it back to minimum.
+%         The slack variable makes sure that the problem is solvable
+%         even though constraints are violated.
+% (15:20) The minimum output constraint is increased and controller
+%         reacts ahead to be above the constraint.
+% (20:25) The control input is u=0, but the output slowly decreases
+%         accoring to the first order dynamics.
+% (30:35) The input price is cheap and the controller increases u and
+%         consequently also y that still stays within constraints.
+figure(1), clf
+subplot(211)
+  stairs(u,'r'), hold on
+  stairs(p,'m')
+  legend('u','p')
+  ylabel('')
+subplot(212)
+  stairs(y), hold on
+  stairs(ymin,'--k')
+  stairs(ymax,'--k')
+  legend('y','ymin','ymax')
+  ylabel('Output')
+  xlabel('Time')
 end
 
 function WindPowerStorageExample
@@ -37,11 +106,6 @@ cvx_begin %quiet
         umin <= u <= umax; % input constraints
 cvx_end
 
-% Check 'cvx_status' if solved.
-% For closed-loop feedback:
-% Use only u(1) and re-solve optimization problem
-% in next time step with updated information
-
 % Results
 % The storage unit charges/discharges according to 
 % wind power production and demand while 
@@ -51,7 +115,7 @@ cvx_end
 % (20:70) The storage charges but also help maintain balance by discharging
 % (40:50) The capacity is above the minimum constraint
 % (70:80) The demand goes up it discharges
-figure(1), clf
+figure(2), clf
 subplot(211)
   stairs(w), hold on
   stairs(u,'r')
@@ -145,5 +209,9 @@ Bd = dss(1:nx,nx+1:nx+nu);
 Ed = dss(1:nx,nx+nu+1:nx+nu+nd);
 end
 
-
-
+function dH = differenceMatrix(N,nu)
+% Compute difference matrix for rate of movement constraints
+% e.g. dumin <= dH*u <= dumax
+I = eye(nu,nu);
+dH = kron(diag(ones(N,1)),I) - kron(diag(ones(N-1,1),-1),I);
+end
